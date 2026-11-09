@@ -69,7 +69,7 @@ function ready() {
 $('file').addEventListener('change', (e) => { loadFile(e.target.files[0]); e.target.value = ''; });
 for (const id of ['pick1', 'bPick']) $(id).addEventListener('click', () => $('file').click());
 for (const id of ['cam1', 'bCam']) $(id).addEventListener('click', startCamera);
-$('bFind').addEventListener('click', () => findSurfaces());
+$('bFind').addEventListener('click', () => { if (showFound && now() - foundAt < 60000) { showFound = false; return; } findSurfaces(); });
 
 // ---------- the camera ("fake AR"): the live picture behind her; when the phone turns, she is moved the other way and seems to stay put ----------
 let camStream = null;
@@ -127,7 +127,7 @@ const inAR = (fn) => { if (arM?.hide) return; if (!arM) { fn(); return; } ctx.sa
 
 // ---------- 找桌面: a vision model on the calendar's server (Cloudflare Workers AI, Moondream) points at the flat places ----------
 const APIS = params.get('api')?.split(',') ?? ['https://frabjous-boba-2c325c.netlify.app', 'https://love-calendar-api.linmz21.workers.dev'];
-let found = [], foundAt = -9e9, finding = false;
+let found = [], areas = [], foundAt = -9e9, finding = false, showFound = false;
 async function findSurfaces() {
   if (!media || finding) return; finding = true;
   const r = fit(), vis = { x: Math.max(0, r.x), y: Math.max(0, r.y) }; vis.w = Math.min(W, r.x + r.w) - vis.x; vis.h = Math.min(H, r.y + r.h) - vis.y;
@@ -150,13 +150,16 @@ async function findSurfaces() {
 function useSurfaces(list, vis, at, cw = 1, ch = 1) {
   if (media?.live && ori && (dog.state === 'away' || !Rref)) { const was = at; refNow(); at = was ?? Rref; }
   const pts = [], order = { 平面: 0, 桌面: 1, 地面: 2 };
+  const toPt = (x, y) => { const p = { x: vis.x + (x > 1.5 ? x / cw : x) * vis.w, y: vis.y + (y > 1.5 ? y / ch : y) * vis.h }; return isAR() && at ? project(p, at, Rref) : p; };
+  areas = [];
+  for (const s of list ?? []) for (const [x0, y0, x1, y1] of s.boxes ?? []) { const q = [toPt(x0, y0), toPt(x1, y0), toPt(x1, y1), toPt(x0, y1)]; if (q.every(Boolean)) areas.push({ label: s.label, q }); }
   for (const s of list ?? []) for (const [x, y] of s.points ?? []) {
     let p = { x: vis.x + (x > 1.5 ? x / cw : x) * vis.w, y: vis.y + (y > 1.5 ? y / ch : y) * vis.h, label: s.label };
     if (isAR() && at) { const q = project(p, at, Rref); if (!q) continue; p = { ...q, label: s.label }; }
     if (!pts.some((q) => Math.hypot(q.x - p.x, q.y - p.y) < size * 0.45)) pts.push(p);
   }
   pts.sort((a, b) => (order[a.label] ?? 3) - (order[b.label] ?? 3) || Math.hypot(a.x - W / 2, a.y - H * 0.6) - Math.hypot(b.x - W / 2, b.y - H * 0.6));
-  found = pts; foundAt = now();
+  found = pts; foundAt = now(); showFound = true;
   if (!pts.length) { hint('没找到能站的地方,点一下她要待的地方吧', 3200); return; }
   hint(`找到 ${pts.length} 处能站的地方 · 也可以自己点`, 3200);
   if (dog.state === 'away' || dog.state === 'sit') goRef(pts[0]);
@@ -167,7 +170,10 @@ let hintTimer = 0;
 function hint(text, ms = 0) { const h = $('hint'); h.textContent = text; h.classList.remove('off'); clearTimeout(hintTimer); if (ms) hintTimer = setTimeout(() => h.classList.add('off'), ms); }
 
 // ---------- the puppy ----------
-let size = 150; // the height of a standing picture on the screen (css px)
+let size = 150; // the height of a standing picture on the screen (css px), for her feet near the bottom of the picture
+// further away = smaller: on a plane seen from above at a slant, the size shrinks toward a horizon somewhat above the picture
+const depthK = (y) => { const r = fit(), top = media?.live ? 0 : r.y, h = media?.live ? H : r.h, hy = top - h * 0.5, near = top + h * 0.92; return clamp((y - hy) / (near - hy), 0.32, 1.15); };
+let curS = 150; // her size right now (size times the depth factor where her feet are)
 const dog = {
   state: 'away', // away | path | wave | sit | leave
   x: 0, y: 0, ground: 0, // feet; ground = the surface under her (for the shadow)
@@ -198,6 +204,7 @@ function nextSeg() {
   dog.seg = s; dog.segAt = now(); dog.dir = s.dir;
 }
 function arrive() { // landed on the spot: wave, then sit and wag
+  if (showFound) setTimeoutClock(() => { if (now() - foundAt > 5000) showFound = false; }, 5000);
   dog.landAt = now(); dog.state = 'wave'; dog.waveAt = now() + 120; dog.waveLoops = dog.first ? 2 : 1;
   say(dog.first ? line('来了') : line('搬家')); dog.first = false;
   hint('点她摸摸头,点两下亲一下 · 点别处她会跳过去', 4200);
@@ -230,11 +237,11 @@ const setTimeoutClock = (fn, ms) => timers.push({ at: now() + ms, fn });
 let bubble = null, ring = null;
 const hearts = [];
 function say(text, ms = 2400) { bubble = { text, until: now() + ms }; }
-function heartsAt(x, y, n = 4) { for (let i = 0; i < n; i++) hearts.push({ x: x + rand(-0.2, 0.2) * size, y: y + rand(-0.05, 0.05) * size, vx: rand(-30, 30), vy: rand(-110, -70), t: 0, life: rand(0.9, 1.4), s: rand(0.8, 1.2) }); }
+function heartsAt(x, y, n = 4) { for (let i = 0; i < n; i++) hearts.push({ x: x + rand(-0.2, 0.2) * curS, y: y + rand(-0.05, 0.05) * curS, vx: rand(-30, 30), vy: rand(-110, -70), t: 0, life: rand(0.9, 1.4), s: rand(0.8, 1.2) }); }
 
 // ---------- taps: on her = pat / kiss; elsewhere = she goes there; two fingers = bigger / smaller ----------
 const pts = new Map(); let pinch = null, lastDogTap = 0, downAt = null;
-const headBox = () => ({ x0: dog.x - size * 0.42, x1: dog.x + size * 0.42, y0: dog.y - size * 1.02, y1: dog.y + 4 });
+const headBox = () => ({ x0: dog.x - curS * 0.42, x1: dog.x + curS * 0.42, y0: dog.y - curS * 1.02, y1: dog.y + 4 });
 cv.addEventListener('pointerdown', (e) => {
   pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (pts.size === 2) { const [a, b] = [...pts.values()]; pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), size }; downAt = null; return; }
@@ -258,8 +265,8 @@ function tap(x, y) {
     if (dog.state !== 'sit' && dog.state !== 'wave') { say('汪!', 900); return; }
     if (dog.state === 'wave') sitDown();
     dog.idleSince = now();
-    if (now() - lastDogTap < 330) { dog.face = 'kiss'; dog.faceUntil = now() + 1600; say(line('亲亲')); heartsAt(dog.x, dog.y - size * 0.9, 7); lastDogTap = 0; return; }
-    lastDogTap = now(); dog.hopAt = now(); dog.face = 'happy'; dog.faceUntil = now() + 1200; say(line('摸头')); heartsAt(dog.x, dog.y - size * 0.9, 3);
+    if (now() - lastDogTap < 330) { dog.face = 'kiss'; dog.faceUntil = now() + 1600; say(line('亲亲')); heartsAt(dog.x, dog.y - curS * 0.9, 7); lastDogTap = 0; return; }
+    lastDogTap = now(); dog.hopAt = now(); dog.face = 'happy'; dog.faceUntil = now() + 1200; say(line('摸头')); heartsAt(dog.x, dog.y - curS * 0.9, 3);
     return;
   }
   const r = fit(); if (x < r.x || x > r.x + r.w || y < r.y || y > r.y + r.h) return;
@@ -271,22 +278,43 @@ $('bBig').addEventListener('click', () => { size = clamp(size * 1.18, 60, 420); 
 
 // ---------- every frame ----------
 function frameCell(row, f, x, y, sx = 1, sy = 1) { // a standing picture, feet at (x, y)
-  const h = size * sy, w = size * (CELL_W / CELL_H) * sx;
+  const h = curS * sy, w = curS * (CELL_W / CELL_H) * sx;
   ctx.drawImage(sheet, f * CELL_W, ROW[row][0] * CELL_H, CELL_W, CELL_H, x - w / 2, y - (FOOT / CELL_H) * h, w, h);
 }
 function sitCell(name, x, y, tail, sx = 1, sy = 1) { // a sitting picture (tail apart), feet at (x, y)
   const p = sitParts[name]; if (!p) return;
-  const k = size / CELL_H, w = CELL_W * k * sx, h = SIT_H * k * sy, left = x - w / 2, top = y - (SIT_FOOT / SIT_H) * h;
+  const k = curS / CELL_H, w = CELL_W * k * sx, h = SIT_H * k * sy, left = x - w / 2, top = y - (SIT_FOOT / SIT_H) * h;
   ctx.drawImage(p.body, left, top, w, h);
   const rx = left + TAIL_ROOT[0] * k * sx, ry = top + TAIL_ROOT[1] * k * sy;
   ctx.save(); ctx.translate(rx, ry); ctx.rotate(tail); ctx.translate(-rx, -ry); ctx.drawImage(p.tail, left, top, w, h); ctx.restore();
+}
+const KIND = { 桌面: '#ff9f43', 地面: '#2ecc71', 平面: '#4aa3ff' };
+function drawFound(t) { // what the model found: each place tinted with its name, and a pad where she would stand (smaller further away)
+  const fade = Math.min(1, (t - foundAt) / 300);
+  ctx.save(); ctx.globalAlpha = fade; const tags = [];
+  for (const a of areas) {
+    const q = a.q.map(toScreen); if (!q.every(Boolean)) continue; const c = KIND[a.label] ?? '#ffffff';
+    ctx.beginPath(); q.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))); ctx.closePath();
+    ctx.fillStyle = c + '26'; ctx.fill(); ctx.setLineDash([8, 6]); ctx.lineWidth = 2; ctx.strokeStyle = c; ctx.stroke(); ctx.setLineDash([]);
+    let lx = Math.max(6, Math.min(...q.map((p) => p.x))) + 6; const ly = Math.max(6, Math.min(...q.map((p) => p.y))) + 6;
+    ctx.font = '700 13px -apple-system, "PingFang SC", sans-serif'; const tw = ctx.measureText(a.label).width;
+    while (tags.some(([x, y, w]) => Math.abs(y - ly) < 24 && lx < x + w + 4 && lx + tw + 14 > x)) lx += 8; // two areas in about the same place: names side by side
+    tags.push([lx, ly, tw + 14]);
+    ctx.fillStyle = c; ctx.beginPath(); ctx.roundRect(lx, ly, tw + 14, 22, 11); ctx.fill(); ctx.fillStyle = '#fff'; ctx.textBaseline = 'middle'; ctx.fillText(a.label, lx + 7, ly + 11.5);
+  }
+  found.forEach((p, i) => {
+    const q = toScreen(p); if (!q) return; const k = depthK(p.y), c = KIND[p.label] ?? '#ff6b9a', pulse = (Math.sin(t / 300 + i) + 1) / 2, rw = size * 0.32 * k;
+    ctx.beginPath(); ctx.ellipse(q.x, q.y, rw * (1 + pulse * 0.15), rw * 0.32 * (1 + pulse * 0.15), 0, 0, Math.PI * 2); ctx.fillStyle = c + '55'; ctx.fill(); ctx.lineWidth = 2.5; ctx.strokeStyle = '#ffffff'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(q.x, q.y, 3.5, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill();
+  });
+  ctx.restore();
 }
 function drawHeart(x, y, s, a) {
   ctx.save(); ctx.globalAlpha = a; ctx.fillStyle = '#ff6b9a'; ctx.translate(x, y); ctx.scale(s, s); ctx.beginPath();
   ctx.moveTo(0, 4); ctx.bezierCurveTo(-10, -4, -6, -12, 0, -7); ctx.bezierCurveTo(6, -12, 10, -4, 0, 4); ctx.fill(); ctx.restore();
 }
 function drawBubble(text, x, y) {
-  const fs = clamp(size * 0.11, 13, 20); ctx.font = `600 ${fs}px -apple-system, "PingFang SC", sans-serif`;
+  const fs = clamp(curS * 0.11, 13, 20); ctx.font = `600 ${fs}px -apple-system, "PingFang SC", sans-serif`;
   const tw = ctx.measureText(text).width, pw = tw + fs * 1.4, ph = fs * 2, bx = clamp(x - pw / 2, 8, W - pw - 8), by = Math.max(8, y - ph - 10);
   ctx.fillStyle = '#ffffff'; ctx.strokeStyle = '#f3a9c4'; ctx.lineWidth = 1.5;
   ctx.beginPath(); ctx.roundRect(bx, by, pw, ph, ph / 2.2); ctx.fill(); ctx.stroke();
@@ -306,15 +334,14 @@ function loop() {
     const r = fit(); ctx.drawImage(media.el, r.x, r.y, r.w, r.h);
     if (ring && t - ring.at < 700) { const k = (t - ring.at) / 700; ctx.save(); ctx.strokeStyle = `rgba(255,120,170,${1 - k})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.ellipse(ring.x, ring.y, 14 + k * 30, (14 + k * 30) * 0.4, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore(); }
     // the places the model found, for a moment
-    const fk = (t - foundAt) / 2200;
-    if (fk < 1) for (const p of found) { const q = toScreen(p); if (!q) continue; ctx.save(); ctx.globalAlpha = 1 - fk; ctx.fillStyle = '#ff6b9a'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(q.x, q.y, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.restore(); }
+    if (showFound) drawFound(t);
     drawDog(t, dt);
   }
   // hearts
   for (let i = hearts.length - 1; i >= 0; i--) { const h = hearts[i]; h.t += dt; h.x += h.vx * dt; h.y += h.vy * dt; if (h.t > h.life) hearts.splice(i, 1); }
   inAR(() => {
-    for (const h of hearts) drawHeart(h.x, h.y, (size / 150) * 1.3 * h.s, 1 - h.t / h.life);
-    if (bubble && t < bubble.until && dog.state !== 'away') drawBubble(bubble.text, dog.x, dog.y - size * (dog.state === 'sit' ? 1.0 : 1.05));
+    for (const h of hearts) drawHeart(h.x, h.y, (curS / 150) * 1.3 * h.s, 1 - h.t / h.life);
+    if (bubble && t < bubble.until && dog.state !== 'away') drawBubble(bubble.text, dog.x, dog.y - curS * (dog.state === 'sit' ? 1.0 : 1.05));
   });
   if (!TEST) requestAnimationFrame(loop);
 }
@@ -329,13 +356,14 @@ function drawDog(t) {
     else { const gy = s.from.y + (s.to.y - s.from.y) * k; dog.x = s.from.x + (s.to.x - s.from.x) * k; lift = 4 * s.h * k * (1 - k); dog.y = gy - lift; dog.ground = k < 0.5 ? s.from.y + (gy - s.from.y) * 0 : gy; dog.ground = gy; row = 'jump'; f = Math.min(4, Math.floor(k * 5)); }
     if (k >= 1) { dog.y = dog.ground = s.to.y; nextSeg(); }
   }
+  curS = size * depthK(dog.ground);
   arM = arAt(dog.x, dog.y);
   inAR(() => paintDog(t, lift, row, f));
 }
 function paintDog(t, lift, row, f) {
   // the shadow on the surface under her
-  const sh = clamp(1 - lift / (size * 1.2), 0.35, 1); ctx.save(); ctx.fillStyle = `rgba(0,0,0,${0.28 * sh})`; ctx.beginPath(); ctx.ellipse(dog.x, dog.ground + 1, size * 0.3 * sh, size * 0.075 * sh, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore();
-  const land = (t - dog.landAt) / 140, sq = land >= 0 && land < 1 ? Math.sin(land * Math.PI) * 0.12 : 0, hop = (t - dog.hopAt) / 300, hy = hop >= 0 && hop < 1 ? Math.sin(hop * Math.PI) * size * 0.12 : 0;
+  const sh = clamp(1 - lift / (size * 1.2), 0.35, 1); ctx.save(); ctx.fillStyle = `rgba(0,0,0,${0.28 * sh})`; ctx.beginPath(); ctx.ellipse(dog.x, dog.ground + 1, curS * 0.3 * sh, curS * 0.075 * sh, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  const land = (t - dog.landAt) / 140, sq = land >= 0 && land < 1 ? Math.sin(land * Math.PI) * 0.12 : 0, hop = (t - dog.hopAt) / 300, hy = hop >= 0 && hop < 1 ? Math.sin(hop * Math.PI) * curS * 0.12 : 0;
   if (dog.state === 'path') { frameCell(row, f, dog.x, dog.y); return; }
   if (dog.state === 'wave' || dog.state === 'leave') {
     const k = (t - dog.waveAt) / 150; if (dog.state === 'wave' && k >= 4 * dog.waveLoops) sitDown();
