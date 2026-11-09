@@ -13,7 +13,7 @@ mkdirSync(OUT, { recursive: true });
 const prof = join(OUT, 'chrome-' + PORT);
 const chrome = spawn('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', [
   '--headless=new', `--remote-debugging-port=${PORT}`, `--user-data-dir=${prof}`, '--window-size=390,844', '--force-device-scale-factor=2',
-  '--hide-scrollbars', '--mute-audio', '--no-first-run', '--no-default-browser-check', '--enable-gpu', '--ignore-gpu-blocklist', '--use-angle=metal', 'about:blank',
+  '--hide-scrollbars', '--mute-audio', '--no-first-run', '--no-default-browser-check', '--enable-gpu', '--ignore-gpu-blocklist', '--use-angle=metal', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', 'about:blank',
 ], { stdio: ['ignore', 'ignore', 'pipe'] });
 const quit = () => { try { chrome.kill('SIGKILL'); } catch {} try { rmSync(prof, { recursive: true, force: true }); } catch {} };
 process.on('exit', quit);

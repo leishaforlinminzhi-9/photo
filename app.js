@@ -46,10 +46,12 @@ addEventListener('resize', resize); resize();
 let media = null; // { el, w, h, video }
 // the blurred backdrop: shrink the picture to a few pixels, then let two smooth enlargements spread it
 const blur = document.createElement('canvas'), blur2 = document.createElement('canvas'); blur.width = 12; blur.height = 20; blur2.width = 60; blur2.height = 100; const blurG = blur.getContext('2d'), blur2G = blur2.getContext('2d');
-const fit = () => { if (!media) return { x: 0, y: 0, w: W, h: H }; const s = Math.min(W / media.w, H / media.h); return { x: (W - media.w * s) / 2, y: (H - media.h * s) / 2, w: media.w * s, h: media.h * s }; };
+// a photo fits inside the screen; the live camera fills it
+const fit = () => { if (!media) return { x: 0, y: 0, w: W, h: H }; const s = (media.live ? Math.max : Math.min)(W / media.w, H / media.h); return { x: (W - media.w * s) / 2, y: (H - media.h * s) / 2, w: media.w * s, h: media.h * s }; };
 
 function loadFile(file) {
   if (!file) return;
+  stopCamera();
   const url = URL.createObjectURL(file);
   if (file.type.startsWith('video/')) {
     const v = document.createElement('video'); v.src = url; v.muted = true; v.loop = true; v.playsInline = true; v.setAttribute('playsinline', '');
@@ -61,10 +63,105 @@ function loadFile(file) {
 function ready() {
   $('start').hidden = true; $('bar').hidden = false; dog.state = 'away'; dog.spot = null; bubble = null; hearts.length = 0;
   const r = fit(); size = clamp(Math.min(r.h * 0.27, r.w * 0.38), 110, 260);
-  hint('点一下照片里,你想让她待的地方');
+  hint(media.live ? '对着桌子,点一下你想让她待的地方' : '点一下照片里,你想让她待的地方');
+  found = []; if (!TEST) setTimeout(findSurfaces, media.live ? 1200 : 400);
 }
 $('file').addEventListener('change', (e) => { loadFile(e.target.files[0]); e.target.value = ''; });
 for (const id of ['pick1', 'bPick']) $(id).addEventListener('click', () => $('file').click());
+for (const id of ['cam1', 'bCam']) $(id).addEventListener('click', startCamera);
+$('bFind').addEventListener('click', () => findSurfaces());
+
+// ---------- the camera ("fake AR"): the live picture behind her; when the phone turns, she is moved the other way and seems to stay put ----------
+let camStream = null;
+async function startCamera() {
+  // iPhone asks for the motion sensors only from inside a tap, so this comes first, before anything is awaited
+  try { if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) DeviceOrientationEvent.requestPermission().catch(() => {}); } catch {}
+  if (!navigator.mediaDevices?.getUserMedia) { hint('这个浏览器打不开相机', 3000); return; }
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false }); }
+  catch { hint('打不开相机:要在弹窗里允许使用相机', 3500); return; }
+  stopCamera(); camStream = stream;
+  const v = document.createElement('video'); v.srcObject = stream; v.muted = true; v.playsInline = true; v.setAttribute('playsinline', '');
+  await v.play().catch(() => {});
+  if (!v.videoWidth) await new Promise((r) => { v.onloadedmetadata = r; });
+  media = { el: v, w: v.videoWidth, h: v.videoHeight, video: true, live: true }; refNow(); ready();
+}
+function stopCamera() { camStream?.getTracks().forEach((t) => t.stop()); camStream = null; }
+// the phone's orientation (smoothed a little) and the rotation it stands for (W3C: device -> earth, Rz(alpha) Rx(beta) Ry(gamma))
+let ori = null;
+addEventListener('deviceorientation', (e) => {
+  if (e.alpha == null) return;
+  if (!ori) { ori = { a: e.alpha, b: e.beta, g: e.gamma }; return; }
+  const k = 0.5, wrap = (d) => ((d + 540) % 360) - 180;
+  ori.a = (ori.a + wrap(e.alpha - ori.a) * k + 360) % 360; ori.b += (e.beta - ori.b) * k; ori.g += wrap(e.gamma - ori.g) * k;
+});
+const RAD = Math.PI / 180;
+function rotM({ a, b, g }) {
+  const ca = Math.cos(a * RAD), sa = Math.sin(a * RAD), cb = Math.cos(b * RAD), sb = Math.sin(b * RAD), cg = Math.cos(g * RAD), sg = Math.sin(g * RAD);
+  return [ca * cg - sa * sb * sg, -cb * sa, cg * sa * sb + ca * sg, cg * sa + ca * sb * sg, ca * cb, sa * sg - ca * cg * sb, -cb * sg, sb, cb * cg];
+}
+let Rref = null, Rcur = null; // the phone when she was placed / now
+const FOCAL = 0.78; // focal length as a share of the camera picture's long side (about a 66 degree view on the long side)
+const focal = () => Math.max(media.w, media.h) * Math.max(W / media.w, H / media.h) * FOCAL;
+const isAR = () => !!(media?.live && Rref && Rcur);
+function refNow() { Rref = ori ? rotM(ori) : null; Rcur = Rref; }
+// a point on the screen as the phone was held at A, to where the same direction shows up when the phone is held at B
+function project(p, A, B) {
+  const f = focal(), dx = p.x - W / 2, dy = -(p.y - H / 2), dz = -f;
+  const wx = A[0] * dx + A[1] * dy + A[2] * dz, wy = A[3] * dx + A[4] * dy + A[5] * dz, wz = A[6] * dx + A[7] * dy + A[8] * dz;
+  const cx = B[0] * wx + B[3] * wy + B[6] * wz, cy = B[1] * wx + B[4] * wy + B[7] * wz, cz = B[2] * wx + B[5] * wy + B[8] * wz;
+  if (cz > -1) return null; // behind the phone
+  return { x: W / 2 + (f * cx) / -cz, y: H / 2 - (f * cy) / -cz };
+}
+const toScreen = (p) => (isAR() ? project(p, Rref, Rcur) : p);
+const toRef = (p) => (isAR() ? project(p, Rcur, Rref) : p);
+// how her spot shows now: where her feet land, which way is up, how big (a turned phone also turns and scales her a little)
+let arM = null;
+function arAt(x, y) {
+  if (!isAR()) return null;
+  const a = toScreen({ x, y }), b = toScreen({ x, y: y - 60 });
+  if (!a || !b || a.x < -W || a.x > 2 * W || a.y < -H || a.y > 2 * H) return { hide: true };
+  return { x: a.x, y: a.y, ang: Math.atan2(b.x - a.x, a.y - b.y), k: Math.hypot(b.x - a.x, b.y - a.y) / 60, rx: x, ry: y };
+}
+const inAR = (fn) => { if (arM?.hide) return; if (!arM) { fn(); return; } ctx.save(); ctx.translate(arM.x, arM.y); ctx.rotate(arM.ang); ctx.scale(arM.k, arM.k); ctx.translate(-arM.rx, -arM.ry); fn(); ctx.restore(); };
+
+// ---------- 找桌面: a vision model on the calendar's server (Cloudflare Workers AI, Moondream) points at the flat places ----------
+const APIS = params.get('api')?.split(',') ?? ['https://frabjous-boba-2c325c.netlify.app', 'https://love-calendar-api.linmz21.workers.dev'];
+let found = [], foundAt = -9e9, finding = false;
+async function findSurfaces() {
+  if (!media || finding) return; finding = true;
+  const r = fit(), vis = { x: Math.max(0, r.x), y: Math.max(0, r.y) }; vis.w = Math.min(W, r.x + r.w) - vis.x; vis.h = Math.min(H, r.y + r.h) - vis.y;
+  const k = 512 / Math.max(vis.w, vis.h), c = document.createElement('canvas'); c.width = Math.round(vis.w * k); c.height = Math.round(vis.h * k);
+  c.getContext('2d').drawImage(media.el, ((vis.x - r.x) / r.w) * media.w, ((vis.y - r.y) / r.h) * media.h, (vis.w / r.w) * media.w, (vis.h / r.h) * media.h, 0, 0, c.width, c.height);
+  const image = c.toDataURL('image/jpeg', 0.8), at = Rcur;
+  hint('正在找桌面…');
+  try {
+    for (const base of APIS) {
+      try {
+        const res = await fetch(base + '/api/surfaces', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ image }), signal: AbortSignal.timeout(20000) });
+        const out = await res.json().catch(() => ({}));
+        if (!res.ok) { if (res.status === 429) { hint(out.message || '找得太频繁了,等一下再试', 3000); return; } continue; }
+        useSurfaces(out.surfaces, vis, at, c.width, c.height); return;
+      } catch { /* the next address */ }
+    }
+    hint('现在连不上识别,点一下她要待的地方吧', 3000);
+  } finally { finding = false; }
+}
+function useSurfaces(list, vis, at, cw = 1, ch = 1) {
+  if (media?.live && ori && (dog.state === 'away' || !Rref)) { const was = at; refNow(); at = was ?? Rref; }
+  const pts = [], order = { 平面: 0, 桌面: 1, 地面: 2 };
+  for (const s of list ?? []) for (const [x, y] of s.points ?? []) {
+    let p = { x: vis.x + (x > 1.5 ? x / cw : x) * vis.w, y: vis.y + (y > 1.5 ? y / ch : y) * vis.h, label: s.label };
+    if (isAR() && at) { const q = project(p, at, Rref); if (!q) continue; p = { ...q, label: s.label }; }
+    if (!pts.some((q) => Math.hypot(q.x - p.x, q.y - p.y) < size * 0.45)) pts.push(p);
+  }
+  pts.sort((a, b) => (order[a.label] ?? 3) - (order[b.label] ?? 3) || Math.hypot(a.x - W / 2, a.y - H * 0.6) - Math.hypot(b.x - W / 2, b.y - H * 0.6));
+  found = pts; foundAt = now();
+  if (!pts.length) { hint('没找到能站的地方,点一下她要待的地方吧', 3200); return; }
+  hint(`找到 ${pts.length} 处能站的地方 · 也可以自己点`, 3200);
+  if (dog.state === 'away' || dog.state === 'sit') goRef(pts[0]);
+}
+function goRef(p) { const r = fit(); come((p.x - r.x) / r.w, (p.y - r.y) / r.h); }
 
 let hintTimer = 0;
 function hint(text, ms = 0) { const h = $('hint'); h.textContent = text; h.classList.remove('off'); clearTimeout(hintTimer); if (ms) hintTimer = setTimeout(() => h.classList.add('off'), ms); }
@@ -155,6 +252,7 @@ const up = (e) => {
 };
 cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', (e) => { pts.delete(e.pointerId); pinch = null; downAt = null; });
 function tap(x, y) {
+  if (media?.live && ori) { Rcur = rotM(ori); if (dog.state === 'away' || !Rref) refNow(); const p = toRef({ x, y }); if (!p) return; x = p.x; y = p.y; }
   const b = headBox(), onDog = dog.state !== 'away' && x > b.x0 && x < b.x1 && y > b.y0 && y < b.y1;
   if (onDog) {
     if (dog.state !== 'sit' && dog.state !== 'wave') { say('汪!', 900); return; }
@@ -198,6 +296,7 @@ function drawBubble(text, x, y) {
 let lastT = now();
 function loop() {
   const t = now(), dt = Math.min(0.05, (t - lastT) / 1000); lastT = t;
+  Rcur = ori && media?.live ? rotM(ori) : Rref; arM = null;
   for (let i = timers.length - 1; i >= 0; i--) if (t >= timers[i].at) { const f = timers[i].fn; timers.splice(i, 1); f(); }
   ctx.clearRect(0, 0, W, H);
   if (media) {
@@ -206,11 +305,17 @@ function loop() {
     ctx.save(); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; ctx.drawImage(blur2, -30, -30, W + 60, H + 60); ctx.fillStyle = '#0000004d'; ctx.fillRect(0, 0, W, H); ctx.restore();
     const r = fit(); ctx.drawImage(media.el, r.x, r.y, r.w, r.h);
     if (ring && t - ring.at < 700) { const k = (t - ring.at) / 700; ctx.save(); ctx.strokeStyle = `rgba(255,120,170,${1 - k})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.ellipse(ring.x, ring.y, 14 + k * 30, (14 + k * 30) * 0.4, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore(); }
+    // the places the model found, for a moment
+    const fk = (t - foundAt) / 2200;
+    if (fk < 1) for (const p of found) { const q = toScreen(p); if (!q) continue; ctx.save(); ctx.globalAlpha = 1 - fk; ctx.fillStyle = '#ff6b9a'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(q.x, q.y, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); ctx.restore(); }
     drawDog(t, dt);
   }
   // hearts
-  for (let i = hearts.length - 1; i >= 0; i--) { const h = hearts[i]; h.t += dt; h.x += h.vx * dt; h.y += h.vy * dt; if (h.t > h.life) { hearts.splice(i, 1); continue; } drawHeart(h.x, h.y, (size / 150) * 1.3 * h.s, 1 - h.t / h.life); }
-  if (bubble && t < bubble.until && dog.state !== 'away') drawBubble(bubble.text, dog.x, dog.y - size * (dog.state === 'sit' ? 1.0 : 1.05));
+  for (let i = hearts.length - 1; i >= 0; i--) { const h = hearts[i]; h.t += dt; h.x += h.vx * dt; h.y += h.vy * dt; if (h.t > h.life) hearts.splice(i, 1); }
+  inAR(() => {
+    for (const h of hearts) drawHeart(h.x, h.y, (size / 150) * 1.3 * h.s, 1 - h.t / h.life);
+    if (bubble && t < bubble.until && dog.state !== 'away') drawBubble(bubble.text, dog.x, dog.y - size * (dog.state === 'sit' ? 1.0 : 1.05));
+  });
   if (!TEST) requestAnimationFrame(loop);
 }
 function drawDog(t) {
@@ -224,6 +329,10 @@ function drawDog(t) {
     else { const gy = s.from.y + (s.to.y - s.from.y) * k; dog.x = s.from.x + (s.to.x - s.from.x) * k; lift = 4 * s.h * k * (1 - k); dog.y = gy - lift; dog.ground = k < 0.5 ? s.from.y + (gy - s.from.y) * 0 : gy; dog.ground = gy; row = 'jump'; f = Math.min(4, Math.floor(k * 5)); }
     if (k >= 1) { dog.y = dog.ground = s.to.y; nextSeg(); }
   }
+  arM = arAt(dog.x, dog.y);
+  inAR(() => paintDog(t, lift, row, f));
+}
+function paintDog(t, lift, row, f) {
   // the shadow on the surface under her
   const sh = clamp(1 - lift / (size * 1.2), 0.35, 1); ctx.save(); ctx.fillStyle = `rgba(0,0,0,${0.28 * sh})`; ctx.beginPath(); ctx.ellipse(dog.x, dog.ground + 1, size * 0.3 * sh, size * 0.075 * sh, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore();
   const land = (t - dog.landAt) / 140, sq = land >= 0 && land < 1 ? Math.sin(land * Math.PI) * 0.12 : 0, hop = (t - dog.hopAt) / 300, hy = hop >= 0 && hop < 1 ? Math.sin(hop * Math.PI) * size * 0.12 : 0;
@@ -235,14 +344,14 @@ function drawDog(t) {
   // sitting: blinks, wags, now and then a little idea; left alone long enough she leaves
   if (dog.faceUntil && t > dog.faceUntil) { dog.face = 'happy'; dog.faceUntil = 0; }
   if (!dog.faceUntil && t > dog.nextBlink) { dog.face = 'blink'; dog.faceUntil = t + 150; dog.nextBlink = t + rand(2600, 4800); }
-  if (t > dog.nextIdea) { dog.nextIdea = t + rand(5000, 8000); if (Math.random() < 0.5) say(line('平时')); else { dog.face = 'listen'; dog.faceUntil = t + 1800; } }
+  if (t > dog.nextIdea) { dog.nextIdea = t + rand(5000, 8000); if (found.length > 1 && Math.random() < 0.35) { const here = found.find((p) => Math.hypot(p.x - dog.x, p.y - dog.y) > size * 0.6); if (here) { dog.idleSince = t; goRef(here); return; } } if (Math.random() < 0.5) say(line('平时')); else { dog.face = 'listen'; dog.faceUntil = t + 1800; } }
   if (t - dog.idleSince > 14000) { leave(); return; }
   const wagSpeed = dog.face === 'kiss' || t - dog.hopAt < 1500 ? 14 : 8, tail = Math.sin(t / 1000 * wagSpeed) * 0.26 - 0.05;
   sitCell(dog.face, dog.x, dog.y - hy, tail, 1 + sq * 0.6, 1 - sq);
 }
 if (TEST) {
   window.__advance = (ms) => { for (let k = 0; k < ms; k += 16) { fakeNow += 16; loop(); } };
-  window.__game = { dog, get size() { return size; }, tap, loadUrl: (u, video) => { fetch(u).then((r) => r.blob()).then((b) => loadFile(new File([b], video ? 'v.mp4' : 'p.jpg', { type: video ? 'video/mp4' : 'image/jpeg' }))); } };
+  window.__game = { dog, get size() { return size; }, tap, surfaces: (list) => { const r = fit(); useSurfaces(list, { x: Math.max(0, r.x), y: Math.max(0, r.y), w: Math.min(W, r.x + r.w) - Math.max(0, r.x), h: Math.min(H, r.y + r.h) - Math.max(0, r.y) }, ori && media?.live ? rotM(ori) : Rcur); }, orient: (a, b, g) => { ori = { a, b, g }; }, startCamera, get ar() { return isAR(); }, loadUrl: (u, video) => { fetch(u).then((r) => r.blob()).then((b) => loadFile(new File([b], video ? 'v.mp4' : 'p.jpg', { type: video ? 'video/mp4' : 'image/jpeg' }))); } };
 } else requestAnimationFrame(loop);
 
 // ---------- 录下来: record the canvas, then save it ----------
