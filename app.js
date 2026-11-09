@@ -69,7 +69,7 @@ function ready() {
 $('file').addEventListener('change', (e) => { loadFile(e.target.files[0]); e.target.value = ''; });
 for (const id of ['pick1', 'bPick']) $(id).addEventListener('click', () => $('file').click());
 for (const id of ['cam1', 'bCam']) $(id).addEventListener('click', startCamera);
-$('bFind').addEventListener('click', () => { if (showFound && now() - foundAt < 60000) { showFound = false; return; } findSurfaces(); });
+$('bFind').addEventListener('click', () => findSurfaces());
 
 // ---------- the camera ("fake AR"): the live picture behind her; when the phone turns, she is moved the other way and seems to stay put ----------
 let camStream = null;
@@ -288,6 +288,7 @@ function sitCell(name, x, y, tail, sx = 1, sy = 1) { // a sitting picture (tail 
   const rx = left + TAIL_ROOT[0] * k * sx, ry = top + TAIL_ROOT[1] * k * sy;
   ctx.save(); ctx.translate(rx, ry); ctx.rotate(tail); ctx.translate(-rx, -ry); ctx.drawImage(p.tail, left, top, w, h); ctx.restore();
 }
+const SHOW_FOUND = false; // she asked not to show the found places (2026-11-09); true draws them again
 const KIND = { 桌面: '#ff9f43', 地面: '#2ecc71', 平面: '#4aa3ff' };
 function drawFound(t) { // what the model found: each place tinted with its name, and a pad where she would stand (smaller further away)
   const fade = Math.min(1, (t - foundAt) / 300);
@@ -334,7 +335,7 @@ function loop() {
     const r = fit(); ctx.drawImage(media.el, r.x, r.y, r.w, r.h);
     if (ring && t - ring.at < 700) { const k = (t - ring.at) / 700; ctx.save(); ctx.strokeStyle = `rgba(255,120,170,${1 - k})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.ellipse(ring.x, ring.y, 14 + k * 30, (14 + k * 30) * 0.4, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore(); }
     // the places the model found, for a moment
-    if (showFound) drawFound(t);
+    if (SHOW_FOUND && showFound) drawFound(t);
     drawDog(t, dt);
   }
   // hearts
