@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
-const OUT = process.env.OUT || '/private/tmp/claude-501/-Users-alicelin-heart/32be0fa8-5c56-495f-90e2-af9e406d9465/scratchpad/photo';
+const OUT = process.env.OUT || new URL('../test/shots', import.meta.url).pathname;
 const URL0 = process.env.URL0 || 'http://127.0.0.1:4414/?test';
 const FPS = 30, PORT = 9300 + Math.floor(Math.random() * 500);
 mkdirSync(OUT, { recursive: true });
